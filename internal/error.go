@@ -5,7 +5,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/go-redis/redis/internal/proto"
+	"github.com/waterandair/go-redis-translation/internal/proto"
 )
 
 func IsRetryableError(err error, retryTimeout bool) bool {

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-redis/redis/internal"
+	"github.com/waterandair/go-redis-translation/internal"
 )
 
 var ErrClosed = errors.New("redis: client is closed")
@@ -34,26 +34,31 @@ type Stats struct {
 }
 
 type Pooler interface {
+	// 建立连接和关闭连接
 	NewConn(context.Context) (*Conn, error)
 	CloseConn(*Conn) error
 
+	// 连接池存取删Conn
 	Get(context.Context) (*Conn, error)
 	Put(*Conn)
 	Remove(*Conn)
 
+	// 监控统计
 	Len() int
 	IdleLen() int
 	Stats() *Stats
 
+	// 关闭连接池
 	Close() error
 }
 
+// Options 初始化配置项
 type Options struct {
 	Dialer  func(c context.Context) (net.Conn, error)
 	OnClose func(*Conn) error
 
 	PoolSize           int
-	MinIdleConns       int
+	MinIdleConns       int // 最小空闲数
 	MaxConnAge         time.Duration
 	PoolTimeout        time.Duration
 	IdleTimeout        time.Duration
@@ -61,26 +66,27 @@ type Options struct {
 }
 
 type ConnPool struct {
-	opt *Options
+	opt *Options // 初始化配置项
 
-	dialErrorsNum uint32 // atomic
+	dialErrorsNum uint32 // atomic 连接错误次数
 
 	lastDialErrorMu sync.RWMutex
-	lastDialError   error
+	lastDialError   error // 连接错误的最后一次的错误类型
 
-	queue chan struct{}
+	queue chan struct{} // 连接池存放空闲的conn的channel
 
 	connsMu      sync.Mutex
-	conns        []*Conn
-	idleConns    []*Conn
+	conns        []*Conn // 建立过的所有连接 conns
+	idleConns    []*Conn // 空闲的(在连接池中没有被使用的) conns
 	poolSize     int
 	idleConnsLen int
 
 	stats Stats
 
-	_closed uint32 // atomic
+	_closed uint32 // atomic  连接池是否被关闭
 }
 
+// ConnPool 实现 Pooler 接口
 var _ Pooler = (*ConnPool)(nil)
 
 func NewConnPool(opt *Options) *ConnPool {
@@ -92,10 +98,12 @@ func NewConnPool(opt *Options) *ConnPool {
 		idleConns: make([]*Conn, 0, opt.PoolSize),
 	}
 
+	// 如果配置了最小空闲数,则建立最小数的空闲连接
 	for i := 0; i < opt.MinIdleConns; i++ {
 		p.checkMinIdleConns()
 	}
 
+	// 连接健康检查
 	if opt.IdleTimeout > 0 && opt.IdleCheckFrequency > 0 {
 		go p.reaper(opt.IdleCheckFrequency)
 	}
@@ -103,6 +111,7 @@ func NewConnPool(opt *Options) *ConnPool {
 	return p
 }
 
+// 检查最小空闲数并初始化满足最小空闲连接数的连接
 func (p *ConnPool) checkMinIdleConns() {
 	if p.opt.MinIdleConns == 0 {
 		return
@@ -114,6 +123,7 @@ func (p *ConnPool) checkMinIdleConns() {
 	}
 }
 
+// 建立空闲连接
 func (p *ConnPool) addIdleConn() {
 	cn, err := p.newConn(context.TODO(), true)
 	if err != nil {
@@ -126,6 +136,7 @@ func (p *ConnPool) addIdleConn() {
 	p.connsMu.Unlock()
 }
 
+// NewConn 实现Pooler接口的 NewConn 方法
 func (p *ConnPool) NewConn(ctx context.Context) (*Conn, error) {
 	return p._NewConn(ctx, false)
 }
@@ -155,10 +166,12 @@ func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
 		return nil, ErrClosed
 	}
 
+	// 发生错误的连接数大于连接池size时,返回最后一个连接错误
 	if atomic.LoadUint32(&p.dialErrorsNum) >= uint32(p.opt.PoolSize) {
 		return nil, p.getLastDialError()
 	}
 
+	// 创建一个连接,如果发生错误:将其设置为 LastDialError,
 	netConn, err := p.opt.Dialer(ctx)
 	if err != nil {
 		p.setLastDialError(err)
@@ -173,6 +186,7 @@ func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
 	return cn, nil
 }
 
+// 恢复连接
 func (p *ConnPool) tryDial() {
 	for {
 		if p.closed() {
@@ -186,6 +200,7 @@ func (p *ConnPool) tryDial() {
 			continue
 		}
 
+		// 当不在出现error时,将错误连接数设置为 0
 		atomic.StoreUint32(&p.dialErrorsNum, 0)
 		_ = conn.Close()
 		return
@@ -420,6 +435,7 @@ func (p *ConnPool) Close() error {
 	return firstErr
 }
 
+// 连接健康检查
 func (p *ConnPool) reaper(frequency time.Duration) {
 	ticker := time.NewTicker(frequency)
 	defer ticker.Stop()
@@ -428,6 +444,7 @@ func (p *ConnPool) reaper(frequency time.Duration) {
 		if p.closed() {
 			break
 		}
+		// 回收超时连接
 		n, err := p.ReapStaleConns()
 		if err != nil {
 			internal.Logger.Printf("ReapStaleConns failed: %s", err)
@@ -437,6 +454,7 @@ func (p *ConnPool) reaper(frequency time.Duration) {
 	}
 }
 
+// 回收超时连接
 func (p *ConnPool) ReapStaleConns() (int, error) {
 	var n int
 	for {

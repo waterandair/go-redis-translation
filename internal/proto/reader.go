@@ -6,7 +6,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/go-redis/redis/internal/util"
+	"github.com/waterandair/go-redis-translation/internal/util"
 )
 
 const (
