@@ -73,7 +73,7 @@ type ConnPool struct {
 	lastDialErrorMu sync.RWMutex
 	lastDialError   error // 连接错误的最后一次的错误类型
 
-	queue chan struct{} // 连接池存放空闲的conn的channel
+	queue chan struct{} // 与连接池 size 一样的 channel
 
 	connsMu      sync.Mutex
 	conns        []*Conn // 建立过的所有连接 conns
@@ -103,7 +103,7 @@ func NewConnPool(opt *Options) *ConnPool {
 		p.checkMinIdleConns()
 	}
 
-	// 连接健康检查
+	// 定时任务，清理过期的conn
 	if opt.IdleTimeout > 0 && opt.IdleCheckFrequency > 0 {
 		go p.reaper(opt.IdleCheckFrequency)
 	}
@@ -166,7 +166,7 @@ func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
 		return nil, ErrClosed
 	}
 
-	// 发生错误的连接数大于连接池size时,返回最后一个连接错误
+	// 判断是否一直出错,发生错误的连接数大于连接池size时,返回最后一个连接错误
 	if atomic.LoadUint32(&p.dialErrorsNum) >= uint32(p.opt.PoolSize) {
 		return nil, p.getLastDialError()
 	}
@@ -175,6 +175,7 @@ func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
 	netConn, err := p.opt.Dialer(ctx)
 	if err != nil {
 		p.setLastDialError(err)
+		// 当错误数超过 poolSize 后,开始重试连接
 		if atomic.AddUint32(&p.dialErrorsNum, 1) == uint32(p.opt.PoolSize) {
 			go p.tryDial()
 		}
@@ -226,6 +227,7 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 		return nil, ErrClosed
 	}
 
+	//等待有空闲,通过channel方式同步，如果连接池满了，则会阻塞等待，但是不会一直阻塞，有一个超时机制
 	err := p.waitTurn(ctx)
 	if err != nil {
 		return nil, err
@@ -240,6 +242,7 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 			break
 		}
 
+		// 取出空闲的，并判断conn是否过期
 		if p.isStaleConn(cn) {
 			_ = p.CloseConn(cn)
 			continue
@@ -249,8 +252,10 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 		return cn, nil
 	}
 
+	// 连接池中没有空闲连接了, misses 数加 1
 	atomic.AddUint32(&p.stats.Misses, 1)
 
+	//创建新的连接
 	newcn, err := p._NewConn(ctx, true)
 	if err != nil {
 		p.freeTurn()
@@ -264,6 +269,7 @@ func (p *ConnPool) getTurn() {
 	p.queue <- struct{}{}
 }
 
+// p.queue是Get方法成功的时候就往channel里面写，Put方法成功就往channel里面读，释放出来位置
 func (p *ConnPool) waitTurn(ctx context.Context) error {
 	var done <-chan struct{}
 	if ctx != nil {
@@ -281,18 +287,21 @@ func (p *ConnPool) waitTurn(ctx context.Context) error {
 
 		select {
 		case <-done:
+			// 临界点处理:防止此时正好有ticker写入了timer.C,但是select到了这一个case里面
 			if !timer.Stop() {
 				<-timer.C
 			}
 			timers.Put(timer)
 			return ctx.Err()
 		case p.queue <- struct{}{}:
+			// 临界点处理:防止此时正好有ticker写入了timer.C,但是select到了这一个case里面
 			if !timer.Stop() {
 				<-timer.C
 			}
 			timers.Put(timer)
 			return nil
 		case <-timer.C:
+			//超时写入机制
 			timers.Put(timer)
 			atomic.AddUint32(&p.stats.Timeouts, 1)
 			return ErrPoolTimeout
@@ -324,9 +333,11 @@ func (p *ConnPool) Put(cn *Conn) {
 	}
 
 	p.connsMu.Lock()
+	// 放入空闲conns里面来，方便Get的时候取出来
 	p.idleConns = append(p.idleConns, cn)
 	p.idleConnsLen++
 	p.connsMu.Unlock()
+	// Get成功时候是写入channel，这个时候自然是释放channel
 	p.freeTurn()
 }
 
@@ -435,7 +446,7 @@ func (p *ConnPool) Close() error {
 	return firstErr
 }
 
-// 连接健康检查
+// 定时清理无用的conns, 一些连接可能会被 redis server 主动断开,所以需要定时清理连接
 func (p *ConnPool) reaper(frequency time.Duration) {
 	ticker := time.NewTicker(frequency)
 	defer ticker.Stop()
@@ -454,15 +465,17 @@ func (p *ConnPool) reaper(frequency time.Duration) {
 	}
 }
 
-// 回收超时连接
+// 清理无用的conns
 func (p *ConnPool) ReapStaleConns() (int, error) {
 	var n int
 	for {
+		// 往 p.queue channel 里面写入一个 struct{}{} ,表示占用一个任务
 		p.getTurn()
 
 		p.connsMu.Lock()
 		cn := p.reapStaleConn()
 		p.connsMu.Unlock()
+		// 处理完了，释放占用的channel的位置
 		p.freeTurn()
 
 		if cn != nil {
@@ -492,6 +505,7 @@ func (p *ConnPool) reapStaleConn() *Conn {
 	return cn
 }
 
+// 判断是不是超时连接
 func (p *ConnPool) isStaleConn(cn *Conn) bool {
 	if p.opt.IdleTimeout == 0 && p.opt.MaxConnAge == 0 {
 		return false

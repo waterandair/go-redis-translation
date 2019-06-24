@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	"github.com/go-redis/redis"
+	"github.com/waterandair/go-redis-translation"
 	"github.com/waterandair/go-redis-translation/internal/proto"
 )
 

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis"
+	"github.com/waterandair/go-redis-translation"
 	"github.com/waterandair/go-redis-translation/internal/hashtag"
 
 	. "github.com/onsi/ginkgo"
