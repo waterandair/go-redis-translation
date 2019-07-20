@@ -23,13 +23,20 @@ var timers = sync.Pool{
 }
 
 // Stats contains pool state information and accumulated stats.
+// Stats 包含池状态信息和统计信息
 type Stats struct {
+	// 获取到空闲连接的次数
 	Hits     uint32 // number of times free connection was found in the pool
+	// 没有获取到空闲连接的次数
 	Misses   uint32 // number of times free connection was NOT found in the pool
+	// 超时次数
 	Timeouts uint32 // number of times a wait timeout occurred
 
+	// 池中总连接数
 	TotalConns uint32 // number of total connections in the pool
+	// 池中空闲连接数
 	IdleConns  uint32 // number of idle connections in the pool
+	// 从池中移除的连接数
 	StaleConns uint32 // number of stale connections removed from the pool
 }
 
@@ -57,8 +64,8 @@ type Options struct {
 	Dialer  func(c context.Context) (net.Conn, error)
 	OnClose func(*Conn) error
 
-	PoolSize           int
-	MinIdleConns       int // 最小空闲数
+	PoolSize           int  // 池大小
+	MinIdleConns       int  // 最小空闲数
 	MaxConnAge         time.Duration
 	PoolTimeout        time.Duration
 	IdleTimeout        time.Duration
@@ -71,14 +78,14 @@ type ConnPool struct {
 	dialErrorsNum uint32 // atomic 连接错误次数
 
 	lastDialErrorMu sync.RWMutex
-	lastDialError   error // 连接错误的最后一次的错误类型
+	lastDialError   error // 连接错误的最后一次的错误
 
 	queue chan struct{} // 与连接池 size 一样的 channel
 
 	connsMu      sync.Mutex
 	conns        []*Conn // 建立过的所有连接 conns
 	idleConns    []*Conn // 空闲的(在连接池中没有被使用的) conns
-	poolSize     int
+	poolSize     int  // 实时池大小
 	idleConnsLen int
 
 	stats Stats
